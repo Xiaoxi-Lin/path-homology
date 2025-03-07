@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  7 09:06:53 2025
+
+@author: linxiaoxi
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 30 17:38:52 2024
+
+@author: linxiaoxi
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import copy 
+import argparse
+import sys
+
+###############################################################################
+"""1-Digraph processing"""
+
+def remove_loops(edges):
+    """remove the loops of the digraph;
+    Params:
+        edges: array;
+    Returns:
+        edges: removed loops edges, array;
+    """
+    loop_idx = []
+    loop_nodes = []
+    for i, e in enumerate(edges):
+        if e[0] == e[1]:
+            loop_idx.append(i)
+            loop_nodes.append(e[0])
+    if len(loop_nodes) > 0:
+        print(f'Warning, loops on node {loop_nodes} were removed.')
+    edges = np.delete(edges, loop_idx, axis=0)
+    return edges
+
+
+def split_independent_component(nodes, edges):
+    """If the digraph is not fully connected, then splitting it into independent 
+    components. Using the depth first search (DFS) algorithms to split the 
+    undirected graph.
+    Params:
+        nodes (array): shape = [k, ], k is the number of the whole graph
+        edges (array): shape = [n, 2]
+    Return:
+        all_components (list): the nodes'set of independent components
+    """
+    # convert into str
+    node_map_idx = {node: idx for idx, node in enumerate(nodes.tolist())}
+
+    # adjacency list of the graph
+    graph = [[] for i in range(nodes.shape[0])]
+    for i, one_edge in enumerate(edges.tolist()):
+        u, v = one_edge
+        # Assuming graph to be undirected.
+        graph[node_map_idx[u]].append(v)
+        graph[node_map_idx[v]].append(u)
+
+    # components list
+    all_components = []
+    visited = [False for n in nodes]
+
+    def depth_first_search(node, component):
+        # marking node as visited.
+        visited[node_map_idx[node]] = True
+
+        # appending node in the component list
+        component.append(node)
+        # visiting neighbours of the current node
+        for neighbour in graph[node_map_idx[node]]:
+            # if the node is not visited then we call dfs on that node.
+            if visited[node_map_idx[neighbour]] is False:
+                depth_first_search(neighbour, component)
+        return None
+
+    for i, one_node in enumerate(nodes.tolist()):
+        if visited[i] is False:
+            component = []
+            depth_first_search(one_node, component)
+            all_components.append(component)
+
+    return all_components
+
+
+def split_independent_digraph(all_components, edges):
+    """If the digraph is not fully connected, then splitting it into independent 
+    components. Using the depth first search (DFS) algorithms to split the undirected 
+    graph.
+    Params:
+        all_components (list): the nodes'set of independent components
+        edges (array): shape = [n, 2]
+    Return:
+        all_digraphs (list): a list of digraphs, each digraph contains a list 
+        of edges.
+    """
+    all_digraphs = [[] for i in all_components]
+    edges_visited = [False for i in edges]
+    for i_c, component in enumerate(all_components):
+        # the list of node_ids of the i_c-th component
+        for i_e, edge in enumerate(edges):
+            if (edges_visited[i_e] is False) and (edge[0] in component or edge[1] in component):
+                all_digraphs[i_c].append(edge.tolist())
+                edges_visited[i_e] = True
+                
+        if len(component) == 1 and np.shape(all_digraphs[i_c])[0] < 1:
+            # isolate points
+            # print(all_digraphs[i_c])
+            all_digraphs[i_c].append(component)
+    return all_digraphs
+
+
+
+###############################################################################
+"""2-compute the basis of partial invariant subspace"""
+
+def reducingMatrix(m):
+    """reducing the given matrix m by performing elementary column tranformations
+    such that pivots of columns are different
+    Params:
+        m (array): matrix;
+    Return: (2-tuple)
+        reduced_m (array) + v (array): all relevant column transformations
+    """
+
+    n_r, n_c = m.shape
+    orig_rank = np.linalg.matrix_rank(m)
+        
+    if n_c - orig_rank > 0:
+        pivots = np.array([None for j in range(n_c)])
+        matv = np.array([[0 if i !=j else 1 for i in range(n_c)] for j in range(n_c)], dtype=float)
+        
+        for j in range(n_c):
+            c_j = m[:, j]
+            check_j = np.where(c_j != 0)[0]  # row indices array
+            if check_j.shape[0] > 0:
+                temp_pivot = check_j[-1]
+                v_pj = m[temp_pivot, j]
+                while (temp_pivot in pivots) and (temp_pivot is not None):
+                    killer_c_id = np.where(pivots == temp_pivot)[0][0]
+                    v_killer = m[temp_pivot, killer_c_id]
+                    temp_v = - v_pj/v_killer
+                    # print(temp_v)
+                    c_j = c_j + temp_v * m[:, killer_c_id]
+                    # print(c_j)
+                    m[:, j] = c_j
+                    # print(m)
+                        
+                    matv[:, j] = matv[:, j] + temp_v * matv[:, killer_c_id]
+                    # print(temp_v)
+                    # print(matv)
+                    new_check_j = np.where(c_j != 0)[0]
+                    if new_check_j.shape[0] > 0:
+                        temp_pivot = new_check_j[-1]
+                        v_pj = m[temp_pivot, j]
+                    else:
+                        temp_pivot = None
+                pivots[j] = temp_pivot
+            else:
+                continue
+        reduced_rank = np.linalg.matrix_rank(m)
+        if orig_rank == reduced_rank:
+            return m, matv
+        else:
+            return print("The reduced matrix has false rank!")
+    
+    else:
+        print("There are no additional partial-invariant path!")
+        return np.array([]), np.array([])
+
+
+def partial_invariant_paths(allowed_path, max_path, regular=1):
+    """compute the partial-invariant paths of dimension from 0 to max_path
+    Params:
+        allowed_path (dict): {'length of path': array of allowed paths};
+        max_path: the maximal length of path;
+        regular: whether or not adopting the regular boundary operator;
+    Return:
+        dict: {'length of path': dataframe =['generators': array, 'coefficient': array]}
+    """
+
+    invariant_paths = {}
+    b_mats, b_mat_ranks, path_arguments = path_boundaryOperator(allowed_path, max_path, regular)
+    
+    for n in range(max_path+1):
+        invariant_paths[n] = pd.DataFrame(columns=['generator', 'coefficient'],
+                                          dtype=object)
+        
+        # dim = 0 or 1
+        if n < 2:
+            tt = 0
+            for i in range(allowed_path[n].shape[0]):
+                invariant_paths[n].loc[tt] = [allowed_path[n][i, :], 1]
+                tt += 1
+            continue 
+        
+        n_bmat, n_1_path_argument = b_mats[n], path_arguments[n-1]
+        temp = 0
+        
+        if n_bmat.size > 0:  # all boundary (n-1)-paths
+            no_ids = []
+            # indices of non-allowed (n-1) paths
+            for idx, (n_1_path_str, coef) in enumerate(n_1_path_argument.items()):
+                if coef == 0:
+                    no_ids.append(idx)
+
+            if no_ids:
+                b_no = np.vstack([n_bmat[i, :] for i in no_ids])
+                reduced_b_no, column_record_v = reducingMatrix(b_no)
+                if len(reduced_b_no.shape) > 1:  # exists allowed n-paths
+                    for j in range(reduced_b_no.shape[1]):
+                        if (reduced_b_no[:, j] == 0).all():  # zero column
+                            r_ids = np.where(column_record_v[:, j] != 0)[0] # array
+                            generators = np.vstack([allowed_path[n][k, :] for k in r_ids])
+                            coeffs = np.array([column_record_v[k, j] for k in r_ids])
+                            invariant_paths[n].loc[temp] = [generators, coeffs]
+                            temp += 1
+            else:
+                # all possible (n-1)-paths are allowed
+                for i in range(allowed_path[n].shape[0]):
+                    generators = allowed_path[n][i, :]
+                    invariant_paths[n].loc[temp] = [generators, 1]
+                    temp += 1
+
+        else:
+            "There are no allowed paths of dimension {}".format(n)
+            
+    return invariant_paths
+
+
+def partial_invariant_2_paths(allowed_path, a_m):
+    """the dimension of partial invariant 2-paths
+    (cf. Homologies of path complexes and digraphs (p29), that is,
+     dim(Omega_2) = dim(A_2) - #(semi-edges))
+    Params:
+        allowed_path (dict): {'length of path': array of allowed paths};
+        a_m (array): the adjacency matrix of the original directed network;
+    Return (int):
+        the dimension of partial invariant 2-paths
+    """
+    num_allowed_2_paths = allowed_path[2].shape[0]
+    
+    num_semi_edges = 0
+    n_nodes = a_m.shape[0]
+    non_link_mat = 1 - np.eye(n_nodes) - a_m  # (a, b)=1, i.e., a->b is not a link
+    rows, cols = np.where(non_link_mat == 1)
+    for i in range(rows.shape[0]):
+        r_i, c_i = rows[i], cols[i]
+        r_r_i = a_m[r_i, :]
+        c_c_i = a_m[:, c_i]
+        num_semi_edges += np.sum(np.multiply(r_r_i, c_c_i))
+    
+    return num_allowed_2_paths - num_semi_edges
+
+
+def dimPartialInv2(am):
+    """the dimension of 2-partial invariant subspace of diagraph without loops
+    Params:
+        am (array):the adjacent matrix
+    Returns (int) : the dimension of Omega_2
+    """
+    dim_allowed2 = np.sum(am @ am)
+    # return dim_allowed2
+    non_am = 1- np.eye(am.shape[0]) - am  # non_am(i,j)=1 i->j does not exists
+    dim_semi = np.sum(non_am * np.where((am @ am)!=0, 1, 0))
+    return int(dim_allowed2 - dim_semi)
+
+
+###############################################################################
+"""3-the dimension of path homology group"""
+
+def allowed_paths(edges, max_path):
+    """Generate the allowed paths of the digraph.
+    Params:
+        edges (array): 
+        max_path (int): the maximal length of path
+    Returs: (2-tuple)
+        allowed_path (dict): 'n': all allowed path of length n (array);
+        allowed_path (str): 'n': all allowed path represented in str (list);
+    """
+    # digraph info
+    
+    if np.array(edges).shape == (1, 1):  # isolated nodes
+        allowed_path = {0: np.array([np.array([n]) for n in edges[0]])}
+        allowed_path_str = {0: [str(n) for n in edges[0]]}
+        for i in range(1, max_path+1):
+            allowed_path[i] = np.array([])
+            allowed_path_str[i] = np.array([])
+        return allowed_path, allowed_path_str
+    
+    else:
+        nodes = np.unique(edges)
+        nodes_num = len(nodes)
+        nodes_idx_map = {node: idx for idx, node in enumerate(nodes)}
+    
+        # edges matrix, start->end = row->column
+        edge_matrix = np.zeros([nodes_num, nodes_num])
+        for i, edge in enumerate(edges):
+            edge_matrix[nodes_idx_map[edge[0]], nodes_idx_map[edge[1]]] = 1
+    
+        # path_0 = vertex set
+        allowed_path = {0: [np.array([n]) for n in nodes]}  
+        # np.array([v0, ... ,vn])
+        allowed_path_str = {0: [str(n) for n in nodes]}   
+        # v0->...->vn
+    
+        # path_(1 to max_path)
+        for i in range(0, max_path):
+            allowed_path[i+1] = []
+            allowed_path_str[i+1] = []
+            for path_previous in allowed_path[i]:
+                for node in nodes:
+                    if edge_matrix[nodes_idx_map[path_previous[-1]], nodes_idx_map[node]]:
+                        new_path = np.append(path_previous, node)
+                        allowed_path[i+1].append(new_path)
+                        allowed_path_str[i+1].append('->'.join([str(one_node) for one_node in new_path]))
+                    else:
+                        continue
+        # easier to read
+        for i in allowed_path.keys():
+            allowed_path[i] = np.array(allowed_path[i])
+    return allowed_path, allowed_path_str
+
+
+def path_boundaryOperator(allowed_path:dict, max_path, regular=1):
+    """Generate the n-th boundary matrix (from 0 to max_path)for mapping (n)-path 
+    to (n-1)-path.
+    Params:
+        allowed_path (dict): 'n': all allowed path of length n (array),
+                             the result of func allowed_paths[0];
+        max_path (int): the maximal length of path;
+        regular: regular or non-regular boundary operator;
+    Return: (3-tuple)
+        boundary_map_matrix (dict): {'dim': Bp of partial_p};
+        boundary_mat_matrix_rank: {'dim': rank of Bp};
+        allowed_path_idx_argument = {'dim-1': whether faces of allowed n-paths 
+                                     are allowed (n-1)-paths (1-Yes, 0-No)}
+    """
+    # For D_0, matrix is [0]*len(nodes)
+    boundary_map_matrix = {0: np.zeros((1, allowed_path[0].shape[0]))}
+    boundary_mat_matrix_rank = {0: 0}
+    allowed_path_idx_argument = {-1: {}}
+    # record the path whether or not an allowed path 1: allowed, 0: non-allowed 
+
+    for n in range(1, max_path+1):
+        boundary_map_dict = {}
+        # record the boundary info of each allowed n-path
+        faces_allowed_path = []  # list of lists
+        # record all possible (n-1)-path, i.e., faces of all allowed n-path
+
+        allowed_path_n_types = allowed_path[n].shape[0]
+        if allowed_path_n_types == 0:  # no allowed n-path
+            boundary_map_matrix[n] = np.zeros((allowed_path[n-1].shape[0], 0))
+            boundary_mat_matrix_rank[n] = 0
+            allowed_path_idx_argument[n-1] = {'->'.join([str(v) for v in tpn]): 1 for tpn in allowed_path[n-1]}
+            continue
+
+        for i_path, path in enumerate(allowed_path[n]):
+            # path: array
+            path_node_idx = path.tolist()  # list of nodes
+            path_str = '->'.join([str(v) for v in path_node_idx])
+            
+            # record the result face after boundary operation
+            face_info = {}
+            for id_vi in range(n+1):
+                # kill the  vi vertex
+                temp_face = np.delete(path_node_idx, id_vi)  # 1-array
+                if regular:  # coefficient of non-regular path is set to 0
+                    if np.array([temp_face[i] != temp_face[i+1] for i in range(temp_face.shape[0]-1)]).all():
+                        temp_face_str = '->'.join([str(pp) for pp in temp_face])
+                        face_info[temp_face_str] = (-1)**(id_vi)
+                        faces_allowed_path.append(temp_face.tolist())
+                    else:
+                        continue
+                else:
+                    temp_face_str = '->'.join([str(pp) for pp in temp_face])
+                    face_info[temp_face_str] = (-1)**(id_vi)
+                    faces_allowed_path.append(temp_face.tolist())
+            
+            boundary_map_dict[path_str] = copy.deepcopy(face_info)
+
+        # generate the boundary matrix, D; row_p * column_p = n_1_path * n_path
+        non_allowed_paths = []
+        for p in faces_allowed_path:
+            if (p not in allowed_path[n-1].tolist()) and (p not in non_allowed_paths):
+                # may be duplicated paths add into the non_allowed_paths
+                non_allowed_paths.append(p)
+                
+        considered_all_faces = np.array(allowed_path[n-1].tolist()+non_allowed_paths)
+        # print(considered_all_faces)
+        # ensure the orders of allowed paths in the considered_all_faces and 
+        # allowed_paths are the same
+        
+        unlimited_boundary_mat = np.zeros((considered_all_faces.shape[0], allowed_path_n_types))
+        for i_path, (i_path_str, i_path_face_info) in enumerate(boundary_map_dict.items()):
+            for j, n_1_path in enumerate(considered_all_faces):
+                n_1_path_str = '->'.join([str(pp) for pp in n_1_path])
+                if n_1_path_str in i_path_face_info.keys():
+                    unlimited_boundary_mat[j, i_path] = i_path_face_info[n_1_path_str]
+
+        # collect informations
+        boundary_map_matrix[n] = unlimited_boundary_mat
+        boundary_mat_matrix_rank[n] = np.linalg.matrix_rank(unlimited_boundary_mat)
+        allowed_path_idx_argument[n-1] = {'->'.join([str(v) for v in tpn]): 1 if tpn.tolist() in allowed_path[n-1].tolist() else 0 for tpn in considered_all_faces}
+
+    return boundary_map_matrix, boundary_mat_matrix_rank, allowed_path_idx_argument
+
+
+def pathHomologyOfConnectedDigraph(allowed_path:dict, max_dim):
+    """compute betti numbers for the given connected digraph
+    Params:
+        allowed_paths (dict): max_path > max_dim !!!;
+        max_dim (int): the maximal dimension of the Betti number;
+    Return:
+        a dictionary records the betti numbers info of each dimension,
+        {'dim': betti number}
+        """
+    
+    d_bm, r_d_bm, label_d_1 = path_boundaryOperator(allowed_path, max_dim+1)
+    
+    betti_nums = {}
+    betti_nums[0] = allowed_path[0].shape[0] - r_d_bm[1]  # dim(A0)-rank(B1)
+    
+    for n in range(max_dim+1):
+        r_n, r_n1 = r_d_bm[n], r_d_bm[n+1]
+        
+        label_n = label_d_1[n].values()
+        mat_sum_space = np.hstack([d_bm[n+1], np.diag(list(label_n))])
+        if mat_sum_space.size > 0:
+            betti_nums[n] = np.linalg.matrix_rank(mat_sum_space) - r_n - r_n1
+        else:
+            betti_nums[n] = 0
+    
+    return betti_nums
+
+
+###############################################################################
+"""path laplacian matrix"""
+
+def partialinvariantTOallowedMat(allowed_path, invariant_path, dims: list):
+    """matrix representation with respect to the basis of partial-invariant paths
+    and the standard basis of allowed paths of dimension dim
+    Params:
+        apia (dict): set of paths with coefficent 1/0 ('str': coeff) of each dimension (key);
+        invariant_apth (dict): partial_invariant paths (df, val) of each dimension (key, >=2);
+        dims (list): the specific dimensions;
+    Return:
+        list of matrix representation (array) with respect to the given dimensions;
+    """
+    
+    info = []
+    
+    for dim in dims:
+        if dim in allowed_path.keys():
+            if dim < 2:
+                info.append(np.eye(allowed_path[dim].shape[0], dtype=float))
+            else:
+                inv_dim = invariant_path[dim]  # dataframe
+                all_dim = allowed_path[dim]  # array
+                
+                if inv_dim.shape[0] == all_dim.shape[0]:
+                    # A_n = Omega_n (include the empty case)
+                    info.append(np.eye(all_dim.shape[0], dtype=float))
+                else:
+                    m = np.zeros((all_dim.shape[0], inv_dim.shape[0]))
+                    all_list = all_dim.tolist()
+                    
+                    if inv_dim.shape[0] > 0:
+                        for i in range(inv_dim.shape[0]):
+                            g_i, c_i = inv_dim.iloc[i]  # g_i (array); c_i (list)
+                            for j in range(g_i.shape[0]):
+                                id = all_list.index(g_i[j].tolist())
+                                m[id, i] = c_i[j]
+                    info.append(m)
+        else:
+            print("no allowed paths of dimension {}".format(dim))
+            info.append(np.zeros((0, 0)))
+    return info
+
+
+def path_boundaryOperatorTOallowedpaths(bm, apia_1):
+    """Generate the n-th boundary matrix for mapping allowed (n)-path 
+    to allowed (n-1)-path.
+    Params:
+        bm (array): the boundary matrix of a given dimension;
+        apia (dict): {'a->b->c': 1 or 0} of a given dimension - 1;
+        (results of the func---path_boundaryOperator)
+    Return: 
+        matrix with respect to the standard basis of allowed paths of dimension 
+        n and n-1, array;
+    """
+    removed_ids = []
+    
+    for id, k in enumerate(apia_1):  # k: key
+        if apia_1[k] == 0:
+            removed_ids.append(id)
+    return np.delete(bm, removed_ids, axis=0)
+
+
+def partialinvariant_boundaryOperator(n_bm2all, o_n, o_n_1):
+    """matrix representation of the n-th boundary operator with respect to the
+    basis of n-partial invariant paths and (n-1)-partial invariant paths
+    Params:
+        n_bm2all (array): n-th boundary matrix for mapping allowed (n)-path 
+        to allowed (n-1)-path;
+        o_n (array): n-th matrix for mapping partial invariant (n)-path 
+        to allowed (n)-path;
+        o_n_1 (array): (n-1)-th matrix for mapping partial invariant (n-1)-path 
+        to allowed (n-1)-path;
+    Return:
+        matrix with respect to the standard basis of partial invariant paths of 
+        dimension n and n-1, array;
+    """
+    # if o_n_1.size > 0: 
+    if o_n_1.shape[0] == o_n_1.shape[1]:
+        return np.matmul(n_bm2all, o_n)
+    else:
+        # if np.matmul(n_bm2all, o_n).size > 0:
+        #     return np.linalg.lstsq(o_n_1, np.matmul(n_bm2all, o_n), rcond=None)[0] 
+        # else:
+        #     re_m = np.array([])
+        #     re_m.shape = np.matmul(n_bm2all, o_n).shape
+        #     return re_m
+        return np.linalg.lstsq(o_n_1, np.matmul(n_bm2all, o_n), rcond=None)[0]
+    # else:
+    #     return np.array([])
+            # regression coefficients
+            
+def LaplacianMat(bm_p, bm_p1):
+    """compute the matrix representation of the p-th combinatorial laplacian"""
+    if (bm_p1 is np.array([])) and (bm_p is not np.array([])):  # the maximal dimension
+        return np.matmul(bm_p.T, bm_p) 
+    elif (bm_p1 is not np.array([])) and (bm_p is np.array([])): # 0 dimension
+        return np.matmul(bm_p1, bm_p1.T)
+    elif (bm_p1 is not np.array([])) and (bm_p is not np.array([])):
+        return np.matmul(bm_p1, bm_p1.T) + np.matmul(bm_p.T, bm_p)
+    else:
+        return np.array([])
+    
+
+def Spectra_Laplacian(lm, isReal=None):
+    """compute the spectrum of the given combinatorial laplacian
+    and sort them from the lowest to the highest"""
+    if len(lm.shape)==2:
+        egivalues = np.round(np.linalg.eig(lm)[0], 4)
+        egivalues.sort()
+        if isReal:
+            egivalues = np.real(egivalues)  
+            # retain the real part of an complex number
+        return egivalues
+    else:
+        return None
+
+
+def pathLaplacianOfDigraph(nodes, edges, max_path):
+    """path laplacian of digraph G
+    Params:
+        nodes (array);
+        edegs (array);
+        max_path (int): the maximal length of path;
+        max_dim (int): the maximal dimension of the laplacian;
+    Return:
+        a dict records the partial-invariant boundary matrix, laplacian matrix 
+        and the spectra of laplacian of each dimension;
+        {'connected component Gi': 'partial_invariant_boundary_mat', 'laplacian_mat', 'spectra'}
+    """
+    
+    no_loop_edges = remove_loops(edges)
+    components = split_independent_component(nodes, no_loop_edges)
+    digraphs = split_independent_digraph(components, no_loop_edges)
+    if len(digraphs) > 1:
+        print("The digraph has {} connected components.".format(len(digraphs)))
+        
+    dg_info = {}
+    temp = 0
+    for dg_edges in digraphs:
+        dg_info[temp] = pd.DataFrame(columns=['partial_invariant_boundray_mat',
+                                                     'laplacian_mat', 'spectra'],
+                                            dtype=object)
+        
+        inv_bm_dict={}
+        dg_allowed_paths = allowed_paths(np.array(dg_edges), max_path)[0]
+        dg_invariant_paths = partial_invariant_paths(dg_allowed_paths, max_path)
+        bmm_dict, apia_dict = path_boundaryOperator(dg_allowed_paths, max_path)[0],\
+                              path_boundaryOperator(dg_allowed_paths, max_path)[2]
+        
+        # print(dg_allowed_paths)
+        # print(bmm_dict)
+        
+        ## boundary matrices with respect to the partial invariant paths
+        for d in range(max_path+2):
+            if d < 2:
+                inv_bm_dict[d] = bmm_dict[d]
+
+            else:
+                if d in bmm_dict.keys():
+                    d_bm = bmm_dict[d]
+                    d_bm2all = path_boundaryOperatorTOallowedpaths(d_bm, apia_dict[d-1])
+                    o_d, o_d_1 = partialinvariantTOallowedMat(dg_allowed_paths, dg_invariant_paths, [d, d-1])
+                    inv_bm = partialinvariant_boundaryOperator(d_bm2all, o_d, o_d_1)
+                    inv_bm_dict[d] = inv_bm
+
+                else:
+                    # max_path + 1
+                    # print("The dimension {} of boundary matrix is not computed".format(d))
+                    inv_bm_dict[d] = np.zeros((dg_invariant_paths[d-1].shape[0], 0))
+        # return inv_bm_dict
+    
+        ## laplacian matrices
+        for d in range(max_path+1):
+            d_bm, d1_bm = inv_bm_dict[d], inv_bm_dict[d+1]
+            d_lm = LaplacianMat(d_bm, d1_bm)
+            spectra_d = Spectra_Laplacian(d_lm, 1)  # the real part
+            dg_info[temp].loc[d] = [d_bm, d_lm, spectra_d]
+        
+        dg_info[temp].loc[max_path+1] = [inv_bm_dict[max_path+1], np.array([]), 
+                                            None]
+        temp+=1
+        
+    return dg_info
